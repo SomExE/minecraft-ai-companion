@@ -1,0 +1,37 @@
+{
+  "name": "minecraft-ai-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Play Minecraft together with your personal AI companion. Extensible Mineflayer MCP server for Java LAN worlds.",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test src/*.test.mjs",
+    "call": "node src/call.mjs",
+    "chat-gateway": "node src/chat-gateway.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "mineflayer": "4.39.0",
+    "mineflayer-pathfinder": "2.4.5",
+    "vec3": "0.2.0",
+    "zod": "4.5.4"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SomExE/minecraft-ai-companion.git"
+  },
+  "keywords": [
+    "minecraft",
+    "mcp",
+    "ai-companion",
+    "mineflayer",
+    "codex",
+    "claude",
+    "multiplayer"
+  ]
+}
