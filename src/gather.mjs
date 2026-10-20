@@ -291,6 +291,13 @@ export async function gatherLogs(
         continue
       }
       mined += 1
+      {
+        // Fallback for 1.21.x: dropped-item entities are often not visible in
+        // bot.entities right after a dig — walk over the dug column anyway,
+        // auto-pickup grabs the log on the way.
+        const fw = await walkNear(current.position, 1, Math.min(9000, targetTimeoutMs))
+        if (fw.kind === 'cancelled') { cancelled = true; break }
+      }
       await collectNearbyDrops()
       if (cancelled) break
     }
