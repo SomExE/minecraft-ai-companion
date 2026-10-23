@@ -297,7 +297,7 @@ export class World {
         bot.pathfinder.setGoal(null)
         bot.clearControlStates()
       }
-    }, (bot) => { bot.pathfinder.setGoal(null); bot.pathfinder.stop() })
+    }, (bot) => { bot.pathfinder.stop(); bot.pathfinder.setGoal(null) })
   }
 
   async equip({ item } = {}) {
@@ -316,8 +316,8 @@ export class World {
       return result
     }, bot => {
       try {
-        bot.pathfinder.setGoal(null)
         bot.pathfinder.stop()
+        bot.pathfinder.setGoal(null)
         bot.stopDigging()
         bot.clearControlStates()
       } finally {
@@ -454,7 +454,7 @@ export class World {
     const active = this.#active
     const bot = this.#bot
     if (active) active.cancel()
-    if (bot?.pathfinder) { bot.pathfinder.setGoal(null); bot.pathfinder.stop() }
+    if (bot?.pathfinder) { bot.pathfinder.stop(); bot.pathfinder.setGoal(null) }
     if (bot) { try { bot.stopDigging() } catch { /* no active dig */ } }
     if (bot?.clearControlStates) bot.clearControlStates()
     return { stopped: Boolean(active) }
