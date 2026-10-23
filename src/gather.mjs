@@ -11,6 +11,16 @@ const MAX_CANDIDATES = 32
 const MAX_ATTEMPTS = 16
 const TARGET_TIMEOUT_MS = 6_000
 const PICKUP_TIMEOUT_MS = 1_000
+// Walking to a drop gets a base budget plus time per block, so a drop a few
+// blocks away is not abandoned after a second. Three tries per drop at most.
+const PICKUP_WALK_MS = 2_000
+const PICKUP_WALK_MS_PER_BLOCK = 500
+const MAX_PICKUP_ATTEMPTS = 3
+// The item entity can show up well after bot.dig resolves on a slow server
+// (about 2 s at 12 TPS, over 4 s at 8 TPS). SETTLE is the idle wait between
+// digs, DROP_WAIT the one at the end, once nothing else is left to overlap with.
+const SETTLE_MS = 500
+const DROP_WAIT_MS = 5_000
 
 function fail(message) {
   return new Error(message)
@@ -52,7 +62,10 @@ function chooseAxe(items) {
 
 function droppedItem(entity) {
   if (!entity) return null
-  if (typeof entity.getDroppedItem === 'function') return entity.getDroppedItem()
+  // getDroppedItem throws on an item entity whose metadata has not arrived yet.
+  try {
+    if (typeof entity.getDroppedItem === 'function') return entity.getDroppedItem()
+  } catch { return null }
   return entity.item || entity.droppedItem || null
 }
 
@@ -60,9 +73,16 @@ function addObstacle(obstacles, value) {
   if (obstacles.length < 12 && !obstacles.includes(value)) obstacles.push(value)
 }
 
-function clearMotion(bot) {
-  try { bot.pathfinder?.setGoal(null) } catch { /* best effort */ }
+// pathfinder.stop() only arms a flag, which the next setGoal() consumes by
+// firing path_stop. Arm it before clearing the goal so this call consumes it;
+// the other order leaves it armed and the next goto fails within a millisecond.
+function haltPath(bot) {
   try { bot.pathfinder?.stop() } catch { /* best effort */ }
+  try { bot.pathfinder?.setGoal(null) } catch { /* best effort */ }
+}
+
+function clearMotion(bot) {
+  haltPath(bot)
   try { bot.stopDigging?.() } catch { /* no active dig */ }
   try { bot.clearControlStates?.() } catch { /* best effort */ }
 }
@@ -146,6 +166,10 @@ export async function gatherLogs(
   const targetTimeoutMs = timing.targetTimeoutMs ?? TARGET_TIMEOUT_MS
   const pickupTimeoutMs = timing.pickupTimeoutMs ?? PICKUP_TIMEOUT_MS
   const finalPickupTimeoutMs = timing.finalPickupTimeoutMs ?? PICKUP_TIMEOUT_MS
+  const pickupWalkMs = timing.pickupWalkMs ?? PICKUP_WALK_MS
+  const pickupMsPerBlock = timing.pickupMsPerBlock ?? PICKUP_WALK_MS_PER_BLOCK
+  const settleMs = timing.settleMs ?? SETTLE_MS
+  const dropWaitMs = timing.dropWaitMs ?? DROP_WAIT_MS
   const pollMs = timing.pollMs ?? 25
   const obstacles = []
   const origin = { ...bot.entity.position }
@@ -156,8 +180,7 @@ export async function gatherLogs(
   const collected = () => Math.max(0, countItems(bot, logName) - before)
   const active = () => Boolean(isActive())
   const stopPath = () => {
-    try { bot.pathfinder.setGoal(null) } catch { /* best effort */ }
-    try { bot.pathfinder.stop() } catch { /* best effort */ }
+    haltPath(bot)
     try { bot.clearControlStates?.() } catch { /* best effort */ }
   }
 
@@ -175,7 +198,16 @@ export async function gatherLogs(
     return result
   }
 
-  const collectNearbyDrops = async () => {
+  const pickupAttempts = new Map()
+  const failedWalks = new Set()
+  const nearbyDrops = () => Object.values(bot.entities || {}).filter((entity) => {
+    const item = droppedItem(entity)
+    return item?.name === logName && entity.position && distance(origin, entity.position) <= maxDistance
+  })
+
+  // Walk to dropped logs until the inventory has enough. While logs are mined
+  // but not yet on the ground or in the inventory, keep looking for up to idleMs.
+  const collectNearbyDrops = async (idleMs) => {
     // The block update resolving bot.dig can precede the item entity or the
     // inventory packet. Give both a small, bounded chance to arrive first.
     if (typeof bot.waitForTicks === 'function' && active()) {
@@ -184,28 +216,35 @@ export async function gatherLogs(
       })
       if (appeared.kind === 'cancelled') { cancelled = true; return }
     }
-    const drops = Object.values(bot.entities || {})
-      .filter((entity) => {
-        const item = droppedItem(entity)
-        return item?.name === logName && entity.position && distance(origin, entity.position) <= maxDistance
-      })
-      .sort((a, b) => distance(bot.entity.position, a.position) - distance(bot.entity.position, b.position))
-      .slice(0, 8)
-
-    for (const entity of drops) {
-      if (collected() >= count || !active()) return
-      const result = await walkNear(entity.position, 1, pickupTimeoutMs)
-      if (result.kind === 'cancelled') { cancelled = true; return }
-      if (result.kind !== 'done') {
-        addObstacle(obstacles, `drop_unreachable@${positionText(entity.position)}`)
+    const deadline = Date.now() + idleMs
+    while (collected() < count) {
+      if (!active()) { cancelled = true; return }
+      const drops = nearbyDrops()
+      const next = drops
+        .filter((entity) => (pickupAttempts.get(entity) || 0) < MAX_PICKUP_ATTEMPTS)
+        .sort((a, b) => distance(bot.entity.position, a.position) - distance(bot.entity.position, b.position))[0]
+      if (!next) {
+        // Drops we gave up on still count as mined. Anything beyond them has not appeared yet.
+        if (mined - collected() - drops.length <= 0 || Date.now() >= deadline) return
+        await new Promise(resolve => setTimeout(resolve, pollMs))
         continue
       }
+
+      pickupAttempts.set(next, (pickupAttempts.get(next) || 0) + 1)
+      const walkMs = Math.min(targetTimeoutMs, pickupWalkMs + pickupMsPerBlock * distance(bot.entity.position, next.position))
+      const result = await walkNear(next.position, 1, walkMs)
+      if (result.kind === 'cancelled') { cancelled = true; return }
       // Let the server deliver the inventory update, but never wait unbounded.
       if (typeof bot.waitForTicks === 'function' && active()) {
         const waited = await bounded(() => bot.waitForTicks(2), {
           isActive: active, timeoutMs: pickupTimeoutMs, pollMs, onAbort: stopPath
         })
         if (waited.kind === 'cancelled') { cancelled = true; return }
+      }
+      if (result.kind !== 'done') {
+        // A drop that is still falling is out of reach now and fine once it lands.
+        failedWalks.add(next)
+        await new Promise(resolve => setTimeout(resolve, settleMs))
       }
     }
   }
@@ -291,11 +330,11 @@ export async function gatherLogs(
         continue
       }
       mined += 1
-      await collectNearbyDrops()
+      await collectNearbyDrops(settleMs)
       if (cancelled) break
     }
 
-    if (!cancelled && collected() < count) await collectNearbyDrops()
+    if (!cancelled && collected() < count) await collectNearbyDrops(dropWaitMs)
     // Falling item entities and inventory packets can arrive after navigation
     // finishes. Give the mined batch one final bounded pickup window.
     if (!cancelled && mined > 0 && collected() < Math.min(count, mined)) {
@@ -308,6 +347,11 @@ export async function gatherLogs(
         check()
       })
       if (!active()) cancelled = true
+    }
+    // Judge failed walks by what became of the drop, not by how goto ended:
+    // a log that was picked up anyway is not an obstacle.
+    for (const entity of failedWalks) {
+      if (bot.entities?.[entity.id] === entity) addObstacle(obstacles, `drop_unreachable@${positionText(entity.position)}`)
     }
     return {
       requested: count,
